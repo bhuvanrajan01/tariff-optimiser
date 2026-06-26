@@ -1,4 +1,5 @@
 # Tariff-Aware Landed Cost Optimizer
+**Live system:** http://129.159.184.31:5678 (n8n workflow — running 24/7)
 
 I built this because I kept seeing the same mistake in procurement case studies — companies picking suppliers based on unit price and ignoring everything that happens between the factory gate and the warehouse door. Duties, freight, currency, lead-time risk. None of it shows up on the quote sheet.
 

@@ -1,148 +1,134 @@
 # Tariff-Aware Landed Cost Optimizer
-**Live system:** http://129.159.184.31:5678 (n8n workflow — running 24/7)
 
-I built this because I kept seeing the same mistake in procurement case studies — companies picking suppliers based on unit price and ignoring everything that happens between the factory gate and the warehouse door. Duties, freight, currency, lead-time risk. None of it shows up on the quote sheet.
+Sticker price is a lie. This project proves it — and automates the correction.
 
-This project automates the full cost picture. It pulls real U.S. tariff rates, live exchange rates, and supplier data, runs them through a landed cost model, and flags when a policy change flips the optimal sourcing decision. The whole thing runs on a schedule and emails you when something changes.
+Built in one week as an independent post-graduation project. Masters in Business Analytics (Supply Chain Management), graduated May 2026. The system computes true landed cost across global suppliers, applies real U.S. tariff policy, detects when trade policy shifts change the optimal sourcing decision, and emails you automatically when it happens.
 
-No paid APIs. No cloud subscription. Runs entirely on your laptop for $0.
-
----
-
-## Why I built this
-
-In 2026, tariffs are not a background variable — they are the variable. An 82% majority of supply chain leaders say their operations are affected by new tariffs (McKinsey, Dec 2025). Yet most procurement tools still rank suppliers by sticker price.
-
-I wanted to build something that quantifies what tariff exposure actually costs, not just in theory but per SKU, per supplier, per day. And then automate the decision loop around it so a procurement team doesn't need to run spreadsheets every time a policy changes.
+**Live system:** http://129.159.184.31:5678 (n8n workflow — cloud hosted, always on)
 
 ---
 
-## What it actually found
+## The finding that motivated this
 
-The clearest example is MECH-001, a precision bearing set sourced from three countries:
+For a precision bearing set (MECH-001), three suppliers quote:
 
-| Supplier | Country | Sticker Price | Effective Tariff | Landed Cost |
+| Supplier | Country | Sticker Price | Effective Tariff | **Landed Cost** |
 |---|---|---|---|---|
-| ShanghaiTech Manufacturing | China | $8.75 | 34% (9% base + 25% Section 301) | $12.86 |
-| MexiParts SA | Mexico | $9.50 | 9% (USMCA — no overlay) | **$11.00** ✓ |
-| DomesticMFG Corp | USA | $14.00 | 0% | $14.02 |
+| ShanghaiTech | China | $8.75 | 34% (9% base + 25% Section 301) | $12.86 |
+| MexiParts SA | Mexico | $9.50 | 9% (USMCA) | **$11.00 ✓** |
+| DomesticMFG | USA | $14.00 | 0% | $14.02 |
 
-China looks cheapest. China is the most expensive. The gap is $1.86 per unit — at 10,000 units a year that is $18,600 sitting invisible behind the sticker price.
+China looks cheapest. China is the most expensive. The gap is $1.86/unit — $18,600/year at volume — hiding entirely behind the sticker price.
 
-The model gets more interesting when you run scenarios. Drop China's Section 301 overlay from 25% to 10% — a plausible policy shift given current trade negotiations — and China flips back to cheapest at $12.29. The system detects this automatically and sends an alert. That is the whole point: policy changes should trigger sourcing reviews without anyone having to remember to check.
-
----
-
-## How it works
-
-The pipeline runs every morning at 7am:
-
-```
-1. Fetch live FX rates from ExchangeRate-API (166 currencies, no API key needed)
-2. Convert and store rates for CNY, INR, MXN, VND
-3. Read all supplier offers and join with real USITC tariff data
-4. Compute landed cost for each supplier-SKU combination
-5. Compare against yesterday's cheapest supplier per SKU
-6. If anything changed — log the alert and send an email
-7. Write fresh results to the database
-8. Metabase dashboard updates automatically
-```
-
-The landed cost formula has four components:
-
-```
-landed_cost = (unit_price × fx_rate)                      ← price in real USD
-            + (freight × fx_rate)                          ← shipping in USD
-            + (fx_price × (base_tariff + overlay) / 100)  ← duty cost
-            + (fx_price × 0.0005 × lead_time_days)        ← lead-time risk
-```
-
-The lead-time risk term (0.0005/day = 18% annual holding rate) is standard inventory carrying cost theory. A supplier 35 days away ties up meaningfully more working capital than one 5 days away — the model prices that difference.
+The model caught it. Automatically. Every morning.
 
 ---
 
-## The tariff model
+## What it does
 
-This is the part I spent the most time getting right. Tariffs in the U.S. come in two layers and most models collapse them into one number, which loses the policy signal.
+- Fetches live FX rates daily (ExchangeRate-API, 166 currencies, no key needed)
+- Applies real USITC 2026 HTS tariff rates — looked up manually from the official schedule
+- Computes 4-component landed cost: unit price + freight + duty + lead-time risk
+- Compares yesterday's optimal supplier against today's
+- Fires an email alert when a policy change flips the recommendation
+- Runs on a 7am schedule with zero manual intervention
 
-**Layer 1 — MFN base rate:** The standard duty on a product, set by its HS code. I looked up each of the six product categories directly in the USITC Harmonized Tariff Schedule 2026 (public domain, free to download). These are the rates customs actually charges.
-
-| Product | HS Code | MFN Base Rate | Notes |
-|---|---|---|---|
-| Wireless Sensor Module | 8517 | 0.00% | Electronics largely duty-free |
-| Power Control Board | 8537 | 2.70% | Control equipment moderate |
-| Precision Bearing Set | 8482 | 9.00% | Bearings historically protected |
-| Aluminium Mounting Frame | 7616 | 2.50% | Standard aluminium articles |
-| Industrial Safety Gloves | 6116 | 13.20% | Textiles carry high base rates |
-| Protective Workwear Set | 6211 | 16.00% | Highest base rate in the dataset |
-
-**Layer 2 — Country overlay:** Additional duties layered on specific countries by policy. Section 301 duties on China are modeled at 25% for electronics and mechanical, 7.5% for textiles — consistent with published USTR structures. Mexico carries 0% overlay under USMCA.
-
-Separating these two layers is what makes the scenario simulator work. You change one number in the overlay table and the entire cost ranking recalculates. That is the mechanism a trade analyst would actually use.
+The scenario simulator is the demo centerpiece: one SQL update changes a tariff overlay, the workflow re-runs, and the system detects and alerts on the supplier switch automatically.
 
 ---
 
-## Tech stack
+## The landed cost formula
 
-| Tool | Role | Why I picked it |
+```
+landed_cost = (unit_price_local × fx_rate)
+            + (freight_local × fx_rate)
+            + (fx_price × (mfn_base_rate + overlay_rate) / 100)
+            + (fx_price × 0.0005 × lead_time_days)
+```
+
+The `0.0005` daily holding rate (18% annual) is standard inventory carrying cost theory. A supplier 35 days away ties up more working capital than one 5 days away — the model prices that difference.
+
+---
+
+## Tariff model
+
+Two layers, kept separate because that's how real trade policy works:
+
+**Layer 1 — MFN base rate** (product-level, from USITC HTS 2026, public domain):
+
+| Product | HS Code | Base Rate |
 |---|---|---|
-| n8n | Workflow orchestration | Visual pipeline builder, self-hostable, free |
-| PostgreSQL | Database | Relational model fits the joins this analysis needs |
-| Docker | Environment | Reproducible setup, everything runs in containers |
-| ExchangeRate-API | FX data | Free, no key, 166 currencies including VND |
-| Metabase | Dashboard | Direct Postgres connection, no CSV export step |
-| JavaScript | Cost logic | Native in n8n Code nodes, no separate service needed |
+| Wireless Sensor Module | 8517 | 0.00% |
+| Power Control Board | 8537 | 2.70% |
+| Precision Bearing Set | 8482 | 9.00% |
+| Aluminium Mounting Frame | 7616 | 2.50% |
+| Industrial Safety Gloves | 6116 | 13.20% |
+| Protective Workwear Set | 6211 | 16.00% |
 
-Everything runs in Docker on a laptop. Total cost: $0.
+**Layer 2 — Country overlay** (policy-level, scenario lever):
+- China: +25% electronics/mechanical, +7.5% textiles (Section 301)
+- Mexico: +0% (USMCA)
+- Vietnam, India: +0% (no current overlay)
+
+Separating these layers is what makes the scenario simulator work. Change the overlay, re-run, the system detects the impact automatically.
 
 ---
 
-## Database design
+## Stack
 
-Ten tables. The ones that matter most:
+| Tool | Role |
+|---|---|
+| n8n (self-hosted) | Workflow orchestration and scheduling |
+| PostgreSQL 16 | Data storage |
+| Docker + Compose | Environment (one command setup) |
+| ExchangeRate-API | Live FX rates |
+| Metabase | Procurement intelligence dashboard |
+| JavaScript | Cost computation logic (n8n Code nodes) |
 
-- **`hs_base_rates`** — the USITC lookup table. Source of truth for base duties.
-- **`country_tariff_overlay`** — the policy layer. This is the scenario lever.
-- **`supplier_offers`** — prices stored in local currency so FX conversion is real, not decorative.
-- **`landed_cost_results`** — the output. Refreshed daily, keeps the last run only.
-- **`previous_cheapest`** — snapshot before each run. Change detection compares against this.
-- **`sourcing_alerts`** — the audit trail. Every detected supplier switch, timestamped.
+Total infrastructure cost: $0.
+
+---
+
+## Repository structure
+
+```
+tariff-optimiser/
+├── docker-compose.yml          # Start everything: docker compose up -d
+├── README.md
+├── sql/
+│   ├── 01_create_tables.sql    # All 10 tables
+│   ├── 02_insert_data.sql      # Suppliers, products, tariffs, FX
+│   └── 03_tariff_scenarios.sql # Scenario simulation queries
+└── js/
+    ├── landed_cost_engine.js   # 4-component cost model
+    ├── fx_transform.js         # Rate inversion logic
+    └── change_detection.js     # Supplier switch detection
+```
 
 ---
 
 ## Setup
 
-You need Docker Desktop and about 15GB of free disk space.
-
 ```bash
-git clone https://github.com/yourusername/tariff-optimiser
+git clone https://github.com/bhuvanrajan01/tariff-optimiser
 cd tariff-optimiser
 docker compose up -d
 ```
 
-Three services start: n8n at `localhost:5678`, Postgres at `5432`, Metabase at `localhost:3000`.
+Connect to Postgres and run `sql/01_create_tables.sql` then `sql/02_insert_data.sql`.
 
-First-time Metabase setup takes about 5 minutes to initialize. Connect it to Postgres using host `postgres`, database `supplychain`, user `scm`.
+Import `workflow.json` into n8n at `localhost:5678`. Add your Postgres credential and SMTP credential. Publish the workflow.
+
+That's it. The system runs itself from there.
 
 ---
 
 ## Honest limitations
 
-Supplier pricing is synthetic. Real supplier contract prices are proprietary — no public dataset will give you "ShanghaiTech charges $8.75 for this bearing." The model architecture is production-ready; the price data is illustrative and documented as such.
+Supplier prices are synthetic — real contract pricing is proprietary. The tariff and FX data are real. The model architecture is production-ready; the pricing data is illustrative and documented as such.
 
-The schedule runs locally, so it only fires when Docker is open. For a real deployment this moves to a cloud VM. I noted this as a known extension rather than pretending it runs 24/7.
-
-VND (Vietnamese dong) is not covered by the ECB reference rates that power Frankfurter, so I switched to ExchangeRate-API which covers 166 currencies. The rate source difference is documented.
+The schedule runs on a cloud VM (Oracle Free Tier). If you're running locally, it only fires when Docker is running.
 
 ---
 
-## What I learned
-
-Building this clarified something I had read in textbooks but not felt: the complexity in global sourcing is not in the math, it is in the data architecture. Getting the tariff model right — two layers, correct HS codes, defensible overlay rates — took longer than writing the cost engine. The engine is arithmetic. The model is judgment.
-
-The other thing: automation without change detection is just a scheduled report. The part that makes this genuinely useful is the comparison step — knowing not just what costs are today but whether they changed from yesterday and why.
-
----
-
-*Masters project — Business Analytics (Supply Chain Management)*  
-*Built independently as a portfolio project, June 2026*
+*Masters in Business Analytics — Supply Chain Management (Graduated May 2026) | Independent project, June 2026*
